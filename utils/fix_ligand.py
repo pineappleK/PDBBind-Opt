@@ -1,24 +1,65 @@
-import os, sys
+import os, sys, warnings
 from io import StringIO
 import json
 from typing import Optional, Dict, List
 from Bio.PDB import PDBIO, Residue
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, Draw
 
 from dimorphite_dl import dimorphite_dl as dl
 from rcsb import get_smiles_from_rcsb
+from openbabel import openbabel
+
 
 with open(os.path.join(os.path.dirname(__file__), 'manual_smiles.json')) as f:
     MANUAL_SMILES = json.load(f)
 
 
 def get_reference_smi(pdb_id, ligand_id):
+    if ligand_id is None:
+        return None
     if pdb_id in MANUAL_SMILES:
         smi = MANUAL_SMILES[pdb_id]
     else:
         smi = get_smiles_from_rcsb(ligand_id)
     return smi
+
+
+def read_by_obabel(path, ob_fmt='mol', secondary_conversion=False):
+    # surpress warnings
+    openbabel.obErrorLog.SetOutputLevel(0)
+
+    suffix = path.split('.')[-1]
+    in_fmt = 'mol' if suffix == 'sdf' else suffix
+
+    ob_mol = openbabel.OBMol()
+    obConversion = openbabel.OBConversion()
+    obConversion.SetInAndOutFormats(in_fmt, ob_fmt)
+    obConversion.ReadFile(ob_mol, path)
+    ob_mol.DeleteHydrogens()
+    ob_str = obConversion.WriteString(ob_mol)
+
+    # Secondary Conversion
+    if secondary_conversion:
+        ob_mol = openbabel.OBMol()
+        obConversion = openbabel.OBConversion()
+        obConversion.SetInAndOutFormats(ob_fmt, 'mol')
+        obConversion.ReadString(ob_mol, ob_str)
+        ob_str = obConversion.WriteString(ob_mol)
+        ob_fmt = 'mol'
+
+    if ob_fmt == 'mol':
+        rd_mol = Chem.MolFromMolBlock(ob_str)
+    elif ob_fmt == 'mol2':
+        rd_mol = Chem.MolFromMol2Block(ob_str)
+    elif ob_fmt == 'xyz':
+        rd_mol = Chem.MolFromXYZBlock(ob_str)
+    elif ob_fmt == 'pdb':
+        rd_mol = Chem.MolFromPDBBlock(ob_str)
+    else:
+        raise NotImplementedError(f'Unsupported format {ob_fmt}')
+
+    return rd_mol
 
 
 def write_sdf(mol, sdf):
@@ -197,7 +238,6 @@ def read_pdbblock(block: str):
     return mol
 
 
-
 class LigandFixException(Exception):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -206,16 +246,73 @@ class LigandFixException(Exception):
 def raise_exception(condition, msg):
     if not condition:
         raise LigandFixException(msg)
+
+
+def AssignBondOrdersFromTemplate(refmol, mol):
+    refmol2 = Chem.Mol(refmol)
+    mol2 = Chem.Mol(mol)
+    # do the molecules match already?
+    matching = mol2.GetSubstructMatch(refmol2)
+    if not matching:  # no, they don't match
+        # check if bonds of mol are SINGLE
+        for b in mol2.GetBonds():
+            if b.GetBondType() != Chem.BondType.SINGLE:
+                b.SetBondType(Chem.BondType.SINGLE)
+                b.SetIsAromatic(False)
+        # set the bonds of mol to SINGLE
+        for b in refmol2.GetBonds():
+            b.SetBondType(Chem.BondType.SINGLE)
+            b.SetIsAromatic(False)
+        # set atom charges to zero;
+        for a in refmol2.GetAtoms():
+            a.SetFormalCharge(0)
+        for a in mol2.GetAtoms():
+            a.SetFormalCharge(0)
+
+    matching = mol2.GetSubstructMatches(refmol2, uniquify=False)
+    # do the molecules match now?
+    if matching:
+        if len(matching) > 1:
+            warnings.warn("More than one matching pattern found - picking one")
+        matching = matching[0]
+        # apply matching: set bond properties
+        for b in refmol.GetBonds():
+            atom1 = matching[b.GetBeginAtomIdx()]
+            atom2 = matching[b.GetEndAtomIdx()]
+            b2 = mol2.GetBondBetweenAtoms(atom1, atom2)
+            b2.SetBondType(b.GetBondType())
+            b2.SetIsAromatic(b.GetIsAromatic())
+
+        # apply matching: set atom properties
+        for a in refmol.GetAtoms():
+            a2 = mol2.GetAtomWithIdx(matching[a.GetIdx()])
+            a2.SetHybridization(a.GetHybridization())
+            a2.SetIsAromatic(a.GetIsAromatic())
+            num_hs = max(0, a.GetNumExplicitHs() + a.GetNumImplicitHs() - len([n for n in a2.GetNeighbors() if n.GetSymbol() == 'H']))
+            a2.SetNumExplicitHs(num_hs)
+            a2.SetFormalCharge(a.GetFormalCharge())
+        # Don't sanitize. Will cause aromaticity errors
+        Chem.SanitizeMol(mol2)
+        if hasattr(mol2, '__sssAtoms'):
+            mol2.__sssAtoms = None  # we don't want all bonds highlighted
+    else:
+        raise ValueError("No matching found")
     
+    for atom in mol2.GetAtoms():
+        atom.SetNumRadicalElectrons(0)
+    mol2.UpdatePropertyCache()
+    return mol2
+
 
 def fix_ligand(sdf, ref_smi, out_sdf, name=None):
+    name = os.path.basename(out_sdf) if name is None else name
     # Bad Ligand
     mol = Chem.SDMolSupplier(sdf, sanitize=False)[0]
     raise_exception(mol is not None, f'Bad ligand: {sdf}')
 
     # Exclude rare elements
     common = {
-        'H', 'B', 'C', 'N', 'O', 'F', 
+        'H', 'C', 'N', 'O', 'F', 
         'S', 'P', 'Cl', 'Br', 'I'
     }
     rares = [at.GetSymbol() for at in mol.GetAtoms() if at.GetSymbol() not in common]
@@ -227,6 +324,8 @@ def fix_ligand(sdf, ref_smi, out_sdf, name=None):
     except Exception as e:
         raise LigandFixException(f'Sanitize failed: {e}')
     
+    mol = Chem.RemoveAllHs(mol)
+
     # Get Reference    
     try:
         ref_mol = Chem.MolFromSmiles(ref_smi, sanitize=False)
@@ -235,20 +334,31 @@ def fix_ligand(sdf, ref_smi, out_sdf, name=None):
         ref_smi = Chem.MolToSmiles(ref_mol, kekuleSmiles=True, isomericSmiles=False)
         ref_mol = Chem.MolFromSmiles(ref_smi)
         ref_mol = run_dl(ref_mol)
+        has_ref = True
     except:
-        ref_mol = None
+        has_ref = False
+        ref_smi = Chem.MolToSmiles(mol, kekuleSmiles=True, isomericSmiles=False)
+        ref_mol = Chem.MolFromSmiles(ref_smi)
+        ref_mol = run_dl(ref_mol)
     
+    for atom in ref_mol.GetAtoms():
+        atom.SetNumExplicitHs(atom.GetNumExplicitHs() + atom.GetNumImplicitHs())
+    Chem.SanitizeMol(ref_mol)
+
     # Fix ligand
     fix_err = ""
     if ref_mol is not None:
-        try:
-            mol = AllChem.AssignBondOrdersFromTemplate(ref_mol, mol)
-        except:
-            mol_flatten = reconstruct_mol(mol)
+        if mol.GetNumHeavyAtoms() != ref_mol.GetNumHeavyAtoms():
+            fix_err = 'Number of atoms not match'
+        else:
             try:
-                mol = AllChem.AssignBondOrdersFromTemplate(ref_mol, mol_flatten)
-            except Exception as e:
-                fix_err = f"Fix failed: {e}"
+                mol = AssignBondOrdersFromTemplate(ref_mol, mol)
+            except:
+                mol_flatten = reconstruct_mol(mol)
+                try:
+                    mol = AssignBondOrdersFromTemplate(ref_mol, mol_flatten)
+                except Exception as e:
+                    fix_err = f"Fix failed: {e}"
         
         if not fix_err:
             status = is_same_molecule(mol, ref_mol)
@@ -257,10 +367,19 @@ def fix_ligand(sdf, ref_smi, out_sdf, name=None):
     mol_h = Chem.AddHs(mol, addCoords=True)
     for prop in mol_h.GetPropNames():
         mol_h.ClearProp(prop)
-    mol_h.SetProp('_Name', os.path.basename(out_sdf) if name is None else name)
+    mol_h.SetProp('_Name', name)
     write_sdf(mol_h, out_sdf)
 
-    raise_exception(ref_mol is not None, "No reference found")
+    if fix_err and ref_mol:
+        ref_mol_noh = Chem.RemoveHs(ref_mol)
+        AllChem.Compute2DCoords(ref_mol_noh)
+        mol_noh = Chem.RemoveHs(mol)
+        AllChem.Compute2DCoords(mol_noh)
+        img = Draw.MolsToGridImage([ref_mol_noh, mol_noh], legends=[name + ' Ref', name + ' Fixed'], subImgSize=(500, 500), returnPNG=True)
+        with open(out_sdf.replace('.sdf', '.png'), 'wb') as f:
+            f.write(img)
+
+    raise_exception(has_ref, "No reference found")
     raise_exception(not fix_err, fix_err)
 
     return mol_h

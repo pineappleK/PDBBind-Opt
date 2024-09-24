@@ -9,6 +9,18 @@ Catching errors in ligand for LP-PDBBind
   - residue number not consistent across different pdbs - some starts from MET1; some with MET0
   - 
 
+## Update 09/24
+Finalize protein fixer and ligand fixer code.
+
+## Update 09/10
+
+A refactor of protein fixing code class to fix:
+1. Wrong residue numbers in REMARK 465 record (example: 2ZMD)
+2. Steric-clashed structures given by PDBFixer.
+    PDBFixer use an incorrect [forcefield](https://github.com/openmm/pdbfixer/blob/master/pdbfixer/pdbfixer.py#L1424) to minimize structures with added residues. I guess it is designed to be as generic
+    as possible to handle non-standard residues and structures without hydrogens. But it will result in very unphysical strcutres.
+    Therefore, I use amber14/tip3p forcefield to further energy minimize the structure after the PDBFixer, and this will give resonable structures. But proteins with non-standard residues can still not be handled.
+
 
 ## Update 09/05
 

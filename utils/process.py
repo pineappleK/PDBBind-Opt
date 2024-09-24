@@ -1,21 +1,33 @@
-import os
+import os, glob
 from collections import defaultdict, Counter
 import multiprocessing as mp
 import traceback
+import networkx as nx
+from typing import List, Optional, Union, Tuple, Dict
 
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
+from scipy.spatial.distance import cdist
 
 import gemmi
-from Bio.PDB import PDBParser, NeighborSearch, Select, PDBIO
 from rdkit import Chem
 from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
 
+import openmm.app as app
+
 from fix_protein import *
 from fix_ligand import *
-from rcsb import download_pdb_cif, download_ligand_sdf
+from rcsb import *
+
+
+standardResidues = [
+    'ALA', 'ASN', 'CYS', 'GLU', 'HIS', 'LEU', 'MET', 'PRO', 'THR', 'TYR',
+    'ARG', 'ASP', 'GLN', 'GLY', 'ILE', 'LYS', 'PHE', 'SER', 'TRP', 'VAL',
+    'CYM', 'CYX', 'GLH', 'ASH', 'LYN', 'HID', 'HIE', 'HIP', 'HIN' 
+    'A', 'G', 'C', 'U', 'I', 'DA', 'DG', 'DC', 'DT', 'DI'
+]
 
 
 def mmcif_corrector(value, type = str):
@@ -161,20 +173,29 @@ def get_cif_header(cif_path, chains = None, lig_of_interest = None):
             residue_num_mapping[chain_id][seq_id] = resnum_total
     
     # Extracting _pdbx_nonpoly_scheme for asymid and strand id mapping
-    lig_of_interest_mapping = {}
-    for row in block.find('_pdbx_nonpoly_scheme.', ['asym_id', 'mon_id', 'pdb_strand_id', 'pdb_seq_num', 'auth_seq_num']):
-        if lig_of_interest is not None and row[1] != lig_of_interest: continue
+    nonpoly_maaping = {}
+    for row in block.find('_pdbx_nonpoly_scheme.', ['asym_id', 'mon_id', 'pdb_strand_id', 'pdb_seq_num', 'auth_seq_num', 'pdb_ins_code']):
         asym_id = mmcif_corrector(row[0], str)
         pdb_strand_id = mmcif_corrector(row[2], str)
         pdb_seq_num = mmcif_corrector(row[3], int)
         auth_seq_num = mmcif_corrector(row[4], int)
-        lig_of_interest_mapping[(pdb_strand_id, pdb_seq_num)] = (asym_id, auth_seq_num)
+        ins_code = mmcif_corrector(row[5], str) if row[5] != '.' else ''
+        nonpoly_maaping[(pdb_strand_id, pdb_seq_num, ins_code)] = (asym_id, auth_seq_num)
+    
+    # find prd_id
+    prd_data = {}
+    for row in block.find('_pdbx_molecule_features.', ['prd_id', 'name', 'type', 'class', 'details']):
+        prd_data['id'] = mmcif_corrector(row[0], str)
+        prd_data['name'] = mmcif_corrector(row[1], str)
+        prd_data['type'] = mmcif_corrector(row[2], str)
+        prd_data['class'] = mmcif_corrector(row[3], str)
+        prd_data['details'] = mmcif_corrector(row[4], str)
         
     # Create DataFrames
     differences_df = pd.DataFrame(sequence_differences, columns=diff_columns)
     alignment_df = pd.DataFrame(alignment_data, columns=columns)
 
-    return alignment_df, differences_df, residue_num_mapping, lig_of_interest_mapping
+    return alignment_df, differences_df, residue_num_mapping, nonpoly_maaping, prd_data
 
 
 def extract_pdb_information(pdb_file):
@@ -182,7 +203,7 @@ def extract_pdb_information(pdb_file):
     headers_of_interest = {"REMARK 465", "REMARK 470", "SEQRES", "MODRES", "SSBOND"}
     lines = defaultdict(list)
     interchain_ss = defaultdict(list)
-    modres_list = []
+    modres_info = {}
     connect = {}
     with open(pdb_file, 'r') as file:
         for line in file:
@@ -201,7 +222,14 @@ def extract_pdb_information(pdb_file):
             if line.startswith("MODRES") and len(line) > 11:
                 chain = line[16]
                 res_name = line[12:15].strip()
-                modres_list.append((chain, res_name))
+                res_num = int(line[18:22])
+                std_name = line[24:27].strip()
+                icode = line[22]
+                if res_name in standardResidues:
+                    continue
+                if std_name not in standardResidues:
+                    continue
+                modres_info[(chain, res_num, icode, res_name)] = std_name
             if line.startswith("CONECT"):
                 atom1 = int(line[6:11].strip())
                 atoms = connect.get(atom1, [])
@@ -213,7 +241,7 @@ def extract_pdb_information(pdb_file):
                 if len(line) > 26 and line[26:31].strip():
                     atoms.append(int(line[26:31].strip()))
                 connect[atom1] = atoms
-    return lines, interchain_ss, modres_list, connect
+    return lines, interchain_ss, modres_info, connect
 
 
 def extract_chain_specific_information(lines, chain_list):
@@ -246,74 +274,63 @@ def extract_chain_specific_information(lines, chain_list):
     return chain_info, ssbond_lines
 
 
-class CustomHetatmSelect(Select):
-    def __init__(self, chain_resid_pairs):
-        """
-        Initialize with:
-        - full_chain_id: the ID of the chain where all residues should be accepted.
-        - chain_resid_pairs: a set of (chain_id, res_id) tuples for selective residue acceptance.
-        """
-        self.chain_resid_pairs = chain_resid_pairs
-
-    def accept_residue(self, residue):
-        """ Accept only residues in the chain_resid_pairs set. """
-        chain_id = residue.get_parent().id
-        res_id = residue.id[1]
-        return (chain_id, res_id) in self.chain_resid_pairs
-
-class CustomResidueSelect(Select):
-    def __init__(self, full_chain_id, modified_residues):
-        """
-        Initialize with:
-        - full_chain_id: the ID of the chain where all residues should be accepted.
-        - chain_resid_pairs: a set of (chain_id, res_id) tuples for selective residue acceptance.
-        """
-        self.full_chain_id = full_chain_id
-        modified_residues_to_include = []
-        for mod in modified_residues:
-            if mod.parent.id in full_chain_id:
-                modified_residues_to_include.append(mod)
-        self.modified_residues_to_include = modified_residues_to_include
-
-    def accept_residue(self, residue):
-        """ Accept all residues from one chain and specific residues from others. """
-        if residue in self.modified_residues_to_include:
-            return True
-        chain_id = residue.get_parent().id
-        if chain_id in self.full_chain_id and residue.id[0] == ' ':
-            return True
-        return False
-
-class CustomAllSelect(Select):
-    def __init__(self, full_chain_id, modified_residues, chain_resid_pairs):
-        self.full_chain_id = full_chain_id
-        modified_residues_to_include = []
-        for mod in modified_residues:
-            if mod.parent.id in full_chain_id:
-                modified_residues_to_include.append(mod)
-        self.modified_residues_to_include = modified_residues_to_include
-        self.chain_resid_pairs = chain_resid_pairs
-    
-    def accept_residue(self, residue):
-        """ Accept all residues from one chain and specific residues from others. """
-        if residue in self.modified_residues_to_include:
-            return True
-        chain_id = residue.get_parent().id
-        if chain_id in self.full_chain_id and residue.id[0] == ' ':
-            return True
-        res_id = residue.id[1]
-        if (chain_id, res_id) in self.chain_resid_pairs:
-            return True
-        return False
+def create_residue_connection_graph(topology: app.Topology):
+    graph = nx.Graph()
+    graph.add_nodes_from([res for res in topology.residues()])
+    for bond in topology.bonds():
+        res1, res2 = bond.atom1.residue, bond.atom2.residue
+        # don't include metal bonds
+        if len(res1) == 1 or len(res2) == 1:
+            continue
+        if not (res1 is res2):
+            graph.add_edge(res1, res2)
+    return graph
 
 
-def process_everything(pdb_id, ligand_id, dataset_dir, chain_dis_cutoff = 10, hetatm_distance_cutoff = 4, add_hydrogens=False, skip_nc_terminal=True):
+def find_connected_residues(graph, residue):
+    find = None
+    for subgraph in nx.connected_components(graph):
+        if residue in subgraph:
+            find = subgraph
+            break
+    return find
+
+
+def find_ligand_residues(topology: app.Topology, ligand_chain: str, ligand_residue_numbers: List, max_num_residues: int = 20, find_connected: bool = True):
+    ligand_residues_number_str = [str(x) for x in ligand_residue_numbers]
+    graph = create_residue_connection_graph(topology)
+    residues = set()
+    for chain in topology.chains():
+        if chain.id != ligand_chain:
+            continue
+        for residue in chain.residues():
+            resid = f'{residue.id}{residue.insertionCode}'.strip()
+            if resid in ligand_residues_number_str:
+                if find_connected:
+                    candidate = find_connected_residues(graph, residue)
+                    if len(residues) == 0:
+                        residues = candidate
+                    else:
+                        assert candidate == residues, "Provided residues are in different chains"
+                else:
+                    residues.add(residue)
+    assert residues is not None, "Provided residues don't exist"
+    assert len(residues) <= max_num_residues, f"Number of ligand residues ({len(residues)}) exceed limit ({max_num_residues})"
+    return list(residues)
+
+
+def process_everything(
+    pdb_id: str, 
+    ligand_id: Optional[str] = None, 
+    ligand_info: Optional[List[Tuple[str, List[int]]]] = None, 
+    dataset_dir: Optional[os.PathLike] = '../raw_data',
+    binding_cutoff: float = 10.0, 
+    hetatm_cutoff: float = 4.0,
+    find_connected_ligand_residues: bool = True
+):
     """
     Run process workflow
     """
-    # check if finished
-    # if os.path.isfile(os.path.join(dataset_dir, f'{pdb_id}/num_ligands_found')) or os.path.isfile(os.path.join(dataset_dir, f'{pdb_id}/err')):
-    #     return True
 
     # Create folder
     if not os.path.isdir(dataset_dir):
@@ -322,180 +339,296 @@ def process_everything(pdb_id, ligand_id, dataset_dir, chain_dis_cutoff = 10, he
     if not os.path.isdir(folder):
         os.mkdir(folder)
 
-    download_pdb_cif(pdb_id, folder, overwrite=True)
+    download_pdb_cif(pdb_id, folder)
     
     pdb_file = os.path.join(folder, f'{pdb_id}.pdb')
     cif_file = os.path.join(folder, f'{pdb_id}.cif')
 
     # read in the key properties from the original pdb and cif file
-    key_properties, interchain_ss, modres_list, connect = extract_pdb_information(pdb_file)
-    alignment_info, diff_info, res_num_mapping, lig_of_interest_mapping = get_cif_header(cif_file, lig_of_interest=ligand_id)
-    structure = PDBParser().get_structure('pdb', pdb_file)[0]
-    polymer_residues = []
+    key_properties, interchain_ss, modres_info, connect = extract_pdb_information(pdb_file)
+    alignment_info, diff_info, res_num_mapping, nonpoly_mapping, prd_data = get_cif_header(cif_file)
+    sequences = {}
+    for _, row in alignment_info.iterrows():
+        sequences[row['chain_id']] = convert_to_three_letter_seq(row['pdbx_seq_one_letter_code'])
+    
+    # OpenMM will change residue namings
+    app.PDBFile._loadNameReplacementTables()
+    app.PDBFile._residueNameReplacements = {k:v for k, v in app.PDBFile._residueNameReplacements.items() if k == v}
+    pdb_omm = app.PDBFile(pdb_file)
+    struct = Structure(pdb_omm.topology, pdb_omm.positions)
+    
+    # Find ligand residues
+    if ligand_info is None:
+        assert isinstance(ligand_id, str), "Must provide ligand id"
+        ligand_info = []
+        for residue in struct.topology.residues():
+            if residue.name == ligand_id:
+                ligand_info.append([residue.chain.id, [residue.id]])
+    assert len(ligand_info) > 0, "No ligands found"
+
+    ligand_residues_list = []
+    for chain, residue_numbers in ligand_info:
+        ligand_residues = find_ligand_residues(struct.topology, chain, residue_numbers, find_connected_ligand_residues)
+        ligand_residues_list.append(ligand_residues)
+    
+    
+    # Classifiy residues to polymer, ligand and hetatoms
+    polymer_residues_info = []
+    for chain in res_num_mapping:
+        for value in res_num_mapping[chain].values():
+            polymer_residues_info.append((chain, value))
+
+    polymer_residues = defaultdict(list)
     hetero_residues = []
-    modified_residues = []
-    ligand_instances = []
-    
-    for residue in structure.get_residues():
-        if residue.id[0] != ' ':
-            if ligand_id in residue.id[0]:
-                ligand_instances.append(residue)
-            else:
-                if (residue.parent.id, residue.id[0].split("_")[-1]) in modres_list:
-                    modified_residues.append(residue)
-                else:
-                    hetero_residues.append(residue)
+    for residue in struct.topology.residues():
+        if any([residue in ligand_residues for ligand_residues in ligand_residues_list]):
+            continue
+        if (residue.chain.id, f'{residue.id}{residue.insertionCode}'.strip()) in polymer_residues_info:
+            polymer_residues[residue.chain.id].append(residue)
         else:
-            polymer_residues.append(residue)
-    
-    ns = NeighborSearch([atom for residue in polymer_residues for atom in residue.get_atoms()])
+            hetero_residues.append(residue)
+
     all_chains_to_include = set()
-    
-    assert len(ligand_instances) > 0, "No ligands found"
-    ligand_fix_log = []
-    for ligand in ligand_instances:
-        ligand_chain = ligand.parent.id
-        ligand_res_id = ligand.id[1]
+    # Find residues to include and save to PDB files
+    for ligand_residues in ligand_residues_list:
+        # Rare elements - raise an error
+        ligand_heavy_atoms = []
+        common_elements = ['H', 'C', 'N', 'O', 'F', 'P', 'S', 'Cl', 'Br', 'I']
+        for residue in ligand_residues:
+            for atom in residue.atoms():
+                if atom.element.symbol not in common_elements:
+                    raise RuntimeError(f'Rare element in ligand: {atom.element.symbol}')
+                if atom.element.symbol != 'H':
+                    ligand_heavy_atoms.append(atom)
+                
+        # Get some info
+        ligand_residues.sort(key=lambda res: res.index)
+        ligand_chain = ligand_residues[0].chain.id
+        if len(ligand_residues) == 1:
+            ligand_name = ligand_residues[0].name
+            ligand_number = f"{ligand_residues[0].id}{ligand_residues[0].insertionCode}".strip()
+        else:     
+            ligand_name = f'{ligand_residues[0].name}-{ligand_residues[-1].name}'
+            ligand_number =  f"{ligand_residues[0].id}{ligand_residues[0].insertionCode}".strip() + '-' + f"{ligand_residues[-1].id}{ligand_residues[-1].insertionCode}".strip()
+        basename = f"{pdb_id}_{ligand_name}_{ligand_chain}_{ligand_number}"
+        subfolder = os.path.join(folder, basename)
+        if not os.path.isdir(subfolder): os.mkdir(subfolder)
         
-        # Download ligand and reference SMILES
-        asym_id, auth_seq_id = lig_of_interest_mapping[(ligand_chain, ligand_res_id)]
-        sdf = download_ligand_sdf(
-            pdb_id, ligand_id, asym_id, auth_seq_id, 
-            folder, 
-            basename=f"{pdb_id}_{ligand_id}_{ligand_chain}_ligand_rcsb.sdf", 
-            raise_error=False,
-            overwrite=True
-        )
-        ref_smi = get_reference_smi(pdb_id, ligand_id)
-        with open(os.path.join(folder, f'{ligand_id}.smi'), 'w') as f:
-            f.write(ref_smi)
+        ligand_positions = struct.get_positions_by_atoms(ligand_heavy_atoms)
+        include = defaultdict(list)
 
-        # Bad sdf, try using PDB to generate a molecule, but this one is with all bonds as single bond
-        out_sdf = sdf.replace("_rcsb.sdf", "_fixed.sdf")
-        try:
-            fix_ligand(sdf, ref_smi, out_sdf, f'{pdb_id}_{ligand_id}_{ligand_chain}')
-        except Exception as e:
-            try:
-                ligand_pdb = sdf.replace('.sdf', '.pdb')
-                pdb_block = write_residue_to_pdb(ligand, connect, ligand_pdb)
-                mol = read_pdbblock(pdb_block)
-                write_sdf(mol, sdf)
-                fix_ligand(sdf, ref_smi, out_sdf, f'{pdb_id}_{ligand_id}_{ligand_chain}')
-            except Exception as e:
-                errmsg = traceback.format_exc()
-                ligand_fix_log.append(f'Ligand fix failed: {pdb_id}_{ligand_id}_{ligand_chain}\n\nError:\n\n {errmsg}')
+        # Proteins chains that are within `binding_cutoff`
+        chains_include = set()
+        for chain_id in polymer_residues.keys():
+            if chain_id in chains_include:
+                continue
 
-        close_chains = set([ligand_chain]) 
+            # Get positions of heavy atoms
+            chain_heavy_atoms = []
+            for residue in polymer_residues[chain_id]:
+                for atom in residue.atoms():
+                    if atom.element.symbol != 'H':
+                        chain_heavy_atoms.append(atom)
+            chain_positions = struct.get_positions_by_atoms(chain_heavy_atoms)
+
+            dist_mat = cdist(ligand_positions, chain_positions)
+            min_dist = np.min(dist_mat) * 10
+            argmin = np.unravel_index(np.argmin(dist_mat), dist_mat.shape)
+            assert min_dist >= 2.0, f"Steric clash (dist. {min_dist:.2f}) observed between {ligand_heavy_atoms[argmin[0]]} and {chain_heavy_atoms[argmin[1]]}"
+
+            if min_dist < binding_cutoff:
+                chains_include.add(chain_id)
+                # include chains that are ssbond connected
+                chains_include = chains_include.union(interchain_ss.get(chain_id, set()))
+        all_chains_to_include.update(chains_include)
         
-        for atom in ligand.get_atoms():
-            close_chain_lig = ns.search(atom.coord, chain_dis_cutoff, level='C')
-            if close_chain_lig:
-                close_chains.update([cc.id for cc in close_chain_lig])
+        for chain_id in chains_include:
+            include['polymer'] += polymer_residues[chain_id]
         
-        for close_chain in list(close_chains)[:]:
-            ss_bonded_chains = interchain_ss[close_chain]
-            if len(ss_bonded_chains) > 0:
-                close_chains.update(ss_bonded_chains)
-        all_chains_to_include = all_chains_to_include.union(close_chains)
-        
-        # select the modified residues that are on the chain
-        # the key thing is to match the residues with the chain id and be able to select them and write them before the TER
-        # the protein files should be finished first and then the hetatms for all the other things should be written
-        
-        heteros_to_include = set()
-        heteros_to_include.add(ligand)
-        hetero_to_search = []
+        # HETATM that are within `hetatm_cutoff`
+        positions = struct.get_positions_by_residues(ligand_residues + include['polymer'])
         for residue in hetero_residues:
-            if residue.parent.id in close_chains:
-                heteros_to_include.add(residue)
-            else:
-                hetero_to_search.append(residue)
-        ligand_ns = NeighborSearch([atom for residue in polymer_residues for atom in residue.get_atoms()] + [atom for atom in ligand.get_atoms()])
-        for residue in hetero_to_search:
-            for atom in residue.get_atoms():
-                close_chain_hetero = ligand_ns.search(atom.coord, hetatm_distance_cutoff, level='C')
-                if close_chain_hetero and np.any([cc.id in close_chains for cc in close_chain_hetero]):
-                    heteros_to_include.add(residue)
-                    break
-        # print(f'Found {len(heteros_to_include)} hetero residues close to ligand {ligand_id}')
-        # extract just the chain specific information
-        selection_res = CustomResidueSelect(close_chains, modified_residues)
-        selection_all = CustomAllSelect(close_chains, modified_residues, [(residue.parent.id, residue.id[1]) for residue in heteros_to_include])
-        selection_het_no_lig = CustomHetatmSelect( [(residue.parent.id, residue.id[1]) for residue in heteros_to_include if residue != ligand])
-        extracted_pdb_file = os.path.join(folder, f'{pdb_id}_{ligand_id}_{ligand_chain}_rcsb.pdb')
-        protein_to_fix = os.path.join(folder, f'{pdb_id}_{ligand_id}_{ligand_chain}_protein_temp.pdb')
-        hetero_temp_path = os.path.join(folder, f'{pdb_id}_{ligand_id}_{ligand_chain}_hetatm.pdb')
+            het_positions = struct.get_positions_by_residues([residue])
+            if np.min(cdist(positions, het_positions)) * 10 < hetatm_cutoff:
+                include['hetatm'].append(residue)
+        # Record ligand
+        include['ligand'] = ligand_residues
         
-        io = PDBIO()
-        io.set_structure(structure)
-        io.save(protein_to_fix, selection_res)
-        io.save(extracted_pdb_file, selection_all)
-        io.save(hetero_temp_path, selection_het_no_lig)
-        chain_properties, ssbond_lines = extract_chain_specific_information(key_properties, close_chains)
+        # ligand
+        ligand_pdb = os.path.join(subfolder, f'{basename}_ligand.pdb')
+        struct.select_residues(include['ligand']).save(ligand_pdb)
+
+        if len(ligand_residues) == 1:
+            query_id = ligand_name
+            asym_id, auth_seq_id = nonpoly_mapping[(ligand_chain, int(ligand_residues[0].id), ligand_residues[0].insertionCode.strip())]
+            sdf = download_ligand_sdf(
+                pdb_id, ligand_name, asym_id, auth_seq_id, 
+                subfolder, 
+                basename=f"{basename}_ligand_rcsb.sdf", 
+                raise_error=False,
+                overwrite=False
+            )
+            # Bad sdf
+            try:
+                mol = Chem.SDMolSupplier(sdf, sanitize=False)[0]
+                assert mol is not None
+            except:
+                if os.path.isfile(sdf): os.remove(sdf)
+        elif prd_data:
+            query_id = prd_data['id']
+        else:
+            query_id = None
         
-        with open(extracted_pdb_file, "r") as f:
-            pdb_lines = f.read()
-        with open(extracted_pdb_file, "w") as f:
-            f.write('\n'.join(chain_properties))
-            f.write('\n')
-            f.write(pdb_lines)
+        ref_smi = get_reference_smi(pdb_id, query_id)
+        if ref_smi:
+            with open(os.path.join(subfolder, f'ref.smi'), 'w') as f:
+                f.write(ref_smi)
         
-        # The complex file was fine from manual inspection of protein 1a4w; need to do the pdbfixer step and correct issues there.
-        seqs = {}
-        for _ , row in alignment_info.iterrows():
-            if row['chain_id'] in close_chains:
-                uniprot_id = row['uniprot_id']
-                seq = row['pdbx_seq_one_letter_code']
-                seqs[row['chain_id']] = (uniprot_id, seq)
-        # print(f"Processing protein {extracted_pdb_file}")
-        fixer, seqres_all = fix_protein(protein_to_fix, protein_to_fix.replace("_temp.pdb", ".pdb"), seqs, res_num_mapping, add_hydrogens, skip_nc_terminal)
-        add_header(protein_to_fix.replace("_temp.pdb", ".pdb"), fixer, seqres_all, res_num_mapping, ssbond_lines)
-        os.remove(protein_to_fix)
+        # convert PDB to SDF
+        ligand_sdf = os.path.join(subfolder, f'{basename}_ligand.sdf')
+        mol = read_by_obabel(ligand_pdb)
+        if mol is not None:
+            mol.SetProp("Origin", "OpenBabel")
+        else:
+            mol = Chem.MolFromPDBFile(ligand_pdb)
+            mol.SetProp("Origin", 'RDKit')
+        write_sdf(mol, ligand_sdf)
+        
+        # protein only
+        seqres = []
+        for chain in chains_include:
+            if chain in sequences:
+                seqres.append(convert_to_seqres(sequences[chain], chain))
+        # modified residues
+        modres_list = []
+        for modres, stdname in modres_info.items():
+            chain, resnum, icode, resname = modres
+            if chain in chains_include:
+                resnum = [k for k, v in res_num_mapping[chain].items() if v == f'{resnum}{icode}'.strip()][0]
+                modres_list.append((chain, resnum, icode, resname, stdname))
+        modres = StandardizedPDBFixer.getModresRecords(modres_list, pdb_id=pdb_id)
+
+        protein_pdb = os.path.join(subfolder, f'{basename}_protein.pdb')
+        struct.select_residues(include['polymer']).save(
+            protein_pdb, 
+            header='\n'.join(seqres + modres), 
+            res_num_mapping=res_num_mapping
+        )
+        # hetetro atoms
+        hetatm_pdb = os.path.join(subfolder, f'{basename}_hetatm.pdb')
+        struct.select_residues(include['hetatm']).save(hetatm_pdb)
+        
+        # all 
+        chain_properties, ssbond_lines = extract_chain_specific_information(key_properties, chains_include)
+        all_pdb = os.path.join(subfolder, f'{basename}_rcsb.pdb')
+        struct.select_residues(include['ligand'] + include['polymer'] + include['hetatm']).save(all_pdb, header='\n'.join(chain_properties))
+
+        # fix proteins
+        protein_pdb_fixed = os.path.join(subfolder, f'{basename}_protein_fixed.pdb')
+        fixer = StandardizedPDBFixer(filename=protein_pdb, pdb_id=pdb_id)
+        fixer.runFixWorkflow(output_file=protein_pdb_fixed, res_num_mapping=res_num_mapping)
     
-    # filter key info for the chains of interest
+    # Record alignment info
     alignment_info = alignment_info[alignment_info['chain_id'].isin(all_chains_to_include)]
     diff_info = diff_info[diff_info['chain_id'].isin(all_chains_to_include)]
-
     alignment_info.to_csv(os.path.join(folder, 'alignment_info.csv'), index=None)
     diff_info.to_csv(os.path.join(folder, 'diff_info.csv'), index=None)
-    with open(os.path.join(folder, 'num_ligands_found'), 'w') as f:
-        f.write(str(len(ligand_instances)))
+
+    fix_ligands_in_folder(folder)
+
+
+def fix_ligands_in_folder(folder):
+    # Fix Ligands
+    err_log = []
+    for ligand_pdb in glob.glob(os.path.join(folder, '*/*_ligand.pdb')):
+        smi_file = os.path.join(os.path.dirname(ligand_pdb), 'ref.smi')
+        if not os.path.isfile(smi_file):
+            ref_smi = None
+        else:
+            with open(smi_file) as f:
+                ref_smi = f.read()
+        name = os.path.basename(ligand_pdb)[:-11]
+        out_sdf = ligand_pdb.replace("_ligand.pdb", "_ligand_fixed.sdf")
+        
+        err_msg = ""
+        try:
+            sdf = ligand_pdb.replace("_ligand.pdb", "_ligand.sdf")
+            fix_ligand(sdf, ref_smi, out_sdf, name)
+        except Exception as err:
+            sdf = ligand_pdb.replace("_ligand.pdb", "_ligand_rcsb.sdf")
+            err_msg = traceback.format_exc()
+            if os.path.isfile(sdf):
+                try:
+                    fix_ligand(sdf, ref_smi, out_sdf, name)
+                    err_msg = ''
+                except Exception as err:
+                    err_msg = traceback.format_exc()
+        if err_msg:
+            err_log.append((name, err_msg))
     
-    if len(ligand_fix_log) > 0:
-        raise RuntimeError('\n------\n'.join(ligand_fix_log))
-
-    return True
-
+    err_msg = '----\n'.join(f'\nError occurs when fixing {name}: \n{err_msg}' for name, err_msg in err_log)
+    if err_msg:
+        raise LigandFixException(err_msg)
+        
 
 if __name__ == "__main__":
     import warnings
+    import shutil
     warnings.filterwarnings("ignore")
     import pandas as pd
     import json
 
-    dataset_dir = '../raw_data'
+    dataset_dir = '../raw_data_pdbbind_sm'
+    # dataset_dir = '../edge_cases'
     if not os.path.isdir(dataset_dir):
         os.mkdir(dataset_dir)
 
     def wrap_process_wf(args):
-        pdbid, ligid = args
+        pdbid, ligand_ccd, ligand_info = args
         try:
-            process_everything(pdbid, ligid, dataset_dir)
+            process_everything(pdbid, ligand_ccd, ligand_info, dataset_dir)
         except Exception as e:
+            # raise e
             errmsg = traceback.format_exc()
             with open(os.path.join(dataset_dir, f'{pdbid}/err'), 'w') as f:
                 f.write(errmsg)
     
-    df = pd.read_csv('../biolip/BioLiP_bind_sm.csv')
-    args = [(pdb_id, ligand_id) for pdb_id, ligand_id in zip(df['PDBID'], df['Ligand CCD'])]
+    df = pd.read_csv('../biolip/PDBBind_sm.csv')
+    args = []
+    for pdbid, subdf in df.groupby('PDBID'):
+        ligand_info, ligand_ccd = [], None
+        for _, row in subdf.iterrows():
+            chain, resnum = row['Ligand chain'], row['Ligand residue sequence number']
+            if str(chain) == 'nan' or str(resnum) == 'nan':
+                continue
+            ligand_info.append((chain, [resnum]))
+        
+        if len(ligand_info) == 0:
+            ligand_info = None
+            ligand_ccd = subdf['Ligand CCD'].iloc[0]
+        arg = (pdbid, ligand_ccd, ligand_info)
+        args.append(arg)
+    # print(len(args))
+    # exit(0)
+    # args = args[:1000]
+    # args = [(pdb_id, ligand_id) for pdb_id, ligand_id in zip(df['PDBID'], df['Ligand CCD']) if pdb_id in ['1a8i']]
+    # args = [arg for arg in args if arg[0] in ['1ado']]
+    # print(args)
+    # args = args[-200:-100]
+    # args = [('4xs2', '42P', None)]
+    with open('Rerun.list') as f:
+        errlist = f.read().split('\n')
+    args = [arg for arg in args if arg[0] in errlist]
+    for arg in args:
+        if os.path.isdir(os.path.join(dataset_dir, arg[0])):
+            shutil.rmtree(os.path.join(dataset_dir, arg[0]))
 
     use_mpi = True
     if use_mpi:
-        num_proc = 10
+        num_proc = 64
         chunksize = 1
         with mp.Pool(num_proc) as p:
             results = list(tqdm(p.imap_unordered(wrap_process_wf, args, chunksize=chunksize), total=len(args)))
     else:
         for arg in tqdm(args):
-            print(arg)
             wrap_process_wf(arg)

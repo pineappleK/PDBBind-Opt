@@ -71,5 +71,7 @@
     "2w1c": "c1cc(ccc1C(=O)Nc2c[nH]nc2c3[nH]c4cc(ccc4n3)CN5CCOCC5)F",
     "6c8x": "B(O)(c1ccc(cc1)S(=O)(=O)N(C[C@H]([C@H](Cc2ccccc2)NC(=O)O[C@H]3CO[C@@H]4[C@H]3CCO4)O)CC(C)C)O",
     "4kv8": "CCN1c2c(cccn2)N(C(=O)c3c1ncc(c3)CCOC4=CC=[N+](c5c4cccc5)[O-])C",
-    "2w1e": "c1ccc(cc1)NC(=O)Nc2c[nH]nc2c3[nH]c4ccc(cc4n3)CN5CCOCC5"
+    "2w1e": "c1ccc(cc1)NC(=O)Nc2c[nH]nc2c3[nH]c4ccc(cc4n3)CN5CCOCC5",
+    "2w87": "[C@H]1([C@@H]([C@H]([C@@H]([C@@H](C(=O)O)O1)O)O)O)O[C@H](CO)[C@H](O)CO",
+    "3x00": "N=C1N[C@@H]2[C@H](CCCCC(=O)NCCCCCC(=O)NCCNC(=O)CCCCCNC(=O)CCCC[C@@H]3SC[C@@H]4NC(=N)N[C@H]34)SC[C@@H]2N1"
 }

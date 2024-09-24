@@ -155,3 +155,6 @@ def download_ligand_sdf(
     fname = os.path.join(folder, basename)
     download_file(url, fname, overwrite, raise_error)
     return fname
+
+if __name__ == '__main__':
+    print(get_smiles_from_rcsb("PRD_001227"))
