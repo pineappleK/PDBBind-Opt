@@ -376,23 +376,19 @@ class StandardizedPDBFixer(PDBFixer):
         self.addMissingAtoms()
         if add_hydrogens or refine_positions:
             self.addMissingHydrogens(7.4)
+
+        top_xmls, ff_xmls = [], []
+        dirname = os.path.dirname(output_file)
+        for residue, std_name in self.nonstandardResidues:
+            top_xml, ff_xml = createPatch(residue, dirname)
+            top_xmls.append(top_xml)
+            ff_xmls.append(ff_xml)
+        
         if refine_positions:
-            ff = None
-            if len(self.nonstandardResidues) > 0:
-                # msg = "Refinement of atom positions with non-standard residue is not supported. Skipped."
-                # warnings.warn(msg)
-                # refine_positions = False
-                non_std_residues, top_xmls, ff_xmls = [], [], []
-                dirname = os.path.dirname(output_file)
-                for residue, std_name in self.nonstandardResidues:
-                    top_xml, ff_xml = createPatch(residue, dirname)
-                    top_xmls.append(top_xml)
-                    ff_xmls.append(ff_xml)
-                    app.Topology.loadBondDefinitions(top_xml)
-                    non_std_residues.append(residue.name)
-                self.topology.createStandardBonds()
-                ff = app.ForceField('amber14-all.xml', 'tip3p.xml', *list(set(ff_xmls)))
-            
+            for top_xml in top_xmls:
+                app.Topology.loadBondDefinitions(top_xml)
+            self.topology.createStandardBonds()
+            ff = app.ForceField('amber14-all.xml', 'tip3p.xml', *list(set(ff_xmls)))
             self.refineAddedAtomPositions(ff)
         
         headers = []
