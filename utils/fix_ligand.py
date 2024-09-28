@@ -16,13 +16,13 @@ with open(os.path.join(os.path.dirname(__file__), 'manual_smiles.json')) as f:
 
 
 def get_reference_smi(pdb_id, ligand_id):
-    if ligand_id is None:
-        return None
     if pdb_id in MANUAL_SMILES:
         smi = MANUAL_SMILES[pdb_id]
+        name = pdb_id
     else:
         smi = get_smiles_from_rcsb(ligand_id)
-    return smi
+        name = ligand_id
+    return smi, name
 
 
 def read_by_obabel(path, ob_fmt='mol', secondary_conversion=False):
@@ -184,15 +184,18 @@ def reconstruct_mol(mol, all_bond_single=True):
 
 
 def run_dl(mol):
-    prev_out = sys.stdout
-    sys.stdout = open(os.devnull, 'w')
+    # clean up arguments, otherwise will raise error
+    sys.argv = sys.argv[:1]
+    # prev_out = sys.stdout
+    # sys.stdout = open(os.devnull, 'w')
     mol_dl = dl.run_with_mol_list(
         [mol],
         min_ph=7.4,
         max_ph=7.4,
         pka_precision=0.0,
+        silent=True
     )[0]
-    sys.stdout = prev_out
+    # sys.stdout = prev_out
     return mol_dl
 
 

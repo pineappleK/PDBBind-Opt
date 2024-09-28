@@ -12,6 +12,9 @@ import numpy as np
 import openmm as mm 
 import openmm.app as app
 import openmm.unit as unit
+from rdkit import Chem
+from openff.toolkit import Molecule, Topology
+from openmmforcefields.generators import GAFFTemplateGenerator, SMIRNOFFTemplateGenerator
 from pdbfixer import PDBFixer
 
 
@@ -189,19 +192,54 @@ def createPatch(residue, folder, amino_acid=True):
     return top_xml, ff_xml
 
 
+def to_quantity(ndarray):
+    value = [mm.Vec3(float(arr[0]), float(arr[1]), float(arr[2])) for arr in ndarray]
+    quantity = unit.Quantity(value, unit=unit.nanometers)
+    return quantity
+
+
 class StandardizedPDBFixer(PDBFixer):
     """
     A class to fix standarized PDB file. Here the standardized means that:
     1. SEQRES record well documented in the PDB header
-    2. PDB residues are numbered in `_pdbx_poly_seq_scheme.seq_id` with no insertion code
+    2. PDB residues are numbered in `_pdbx_poly_seq_scheme.seq_id` with no insertion code. 
+        This will make PDBFixer able to find all missing residues.
     """
-    def __init__(self, filename: os.PathLike, verbose: bool = False, pdb_id: str = ""):
-        super().__init__(filename=str(filename))
+    def __init__(self, protein_pdb: os.PathLike, ligand_sdf: Optional[os.PathLike] = None, verbose: bool = False, pdb_id: str = ""):
+        super().__init__(filename=str(protein_pdb))
+        
+        if ligand_sdf:
+            self.addLigand(ligand_sdf)
+            self._has_ligand = True
+        else:
+            self._has_ligand = False
+        
         self.mod_res_info = []
         self.missing_residues_added = []
+        self.missing_residues_skipped = []
         self.missing_atoms_added = []
         self.verbose = verbose
         self.pdb_id = pdb_id
+    
+    def addLigand(self, ligand_sdf: os.PathLike):
+        # Build ligand force field
+        mol = Chem.SDMolSupplier(ligand_sdf, removeHs=False)[0]
+        Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
+        self.ligand_missing_atoms = [int(x) for x in mol.GetPropsAsDict().get('Missing Atoms', '')]
+        self.rdmol = mol
+        
+        off_mol = Molecule.from_rdkit(mol, allow_undefined_stereo=True, hydrogens_are_explicit=True)
+        off_mol.assign_partial_charges('gasteiger')
+        self.off_mol = off_mol
+        # self.ligand_ff_generator = GAFFTemplateGenerator(molecules=[off_mol], forcefield='gaff-2.11')
+        # self.ligand_ff_generator = SMIRNOFFTemplateGenerator(molecule=[off_mol])
+
+        self.ligand_pos = to_quantity(mol.GetConformer().GetPositions() / 10)
+        self.ligand_top = Topology.from_molecules(off_mol).to_openmm()
+        modeller = app.Modeller(self.topology, self.positions)
+        modeller.add(self.ligand_top, self.ligand_pos)
+        self.topology = modeller.getTopology()
+        self.positions = modeller.getPositions()
 
     def log(self, *args):
         if self.verbose:
@@ -215,7 +253,7 @@ class StandardizedPDBFixer(PDBFixer):
                 (residue.chain.id, int(residue.id), residue.insertionCode, residue.name, std_res_name)
             )
 
-    def findMissingResidues(self, skip_terminals: bool = True):
+    def findMissingResidues(self, skip_terminals: bool = True, skip_long_residues: Optional[int] = None):
         sequences = {seq.chainId: seq.residues for seq in self.sequences}
         chains = list(self.topology.chains())
         
@@ -227,17 +265,20 @@ class StandardizedPDBFixer(PDBFixer):
             chain_index, res_id_start = info
             chain_id = chains[chain_index].id
             is_ter = (res_id_start == 0) or (num_missing_residues[chain_id] + len(residues) + res_id_start == len(sequences[chain_id]))
-            if is_ter and skip_terminals:
+            offset = res_id_start + num_missing_residues[chain_id] + 1
+            if (is_ter and skip_terminals) or (isinstance(skip_long_residues, int) and len(residues) > skip_long_residues):
                 item_to_pop.append(info)
+                for i, residue in enumerate(residues):
+                    self.missing_residues_skipped.append((chain_id, offset + i, residue))
             else:
-                offset = res_id_start + num_missing_residues[chain_id] + 1
                 for i, residue in enumerate(residues):
                     self.missing_residues_added.append((chain_id, offset + i, residue))
             num_missing_residues[chain_id] += len(residues)
 
         for info in item_to_pop:
             self.missingResidues.pop(info)
-        self.log('Missing residues:', self.missing_residues_added)
+        self.log('Add  missing residues:', self.missing_residues_added)
+        self.log('Skip missing residues:', self.missing_residues_skipped)
         
     def findMissingAtoms(self, skip_terminals: bool = False):
         # Find missing atoms
@@ -273,13 +314,13 @@ class StandardizedPDBFixer(PDBFixer):
 
 
     @classmethod
-    def getFixedResidueRemarks(cls, missing_residues_info: List[Tuple[str, int, str]], res_num_mapping=None):
+    def getFixedResidueRemarks(cls, missing_residues_info: List[Tuple[str, int, str]], res_num_mapping=None, use_fixed_remark: bool = True):
         if len(missing_residues_info) == 0:
             return []
         
         remark_465_lines = [
             "REMARK 465",
-            "REMARK 465 FIXED MISSING RESIDUES",
+            "REMARK 465 FIXED MISSING RESIDUES" if use_fixed_remark else  "REMARK 465 MISSING RESIDUES",
             "REMARK 465 (M=MODEL NUMBER; RES=RESIDUE NAME; C=CHAIN",
             "REMARK 465 IDENTIFIER; SSSEQ=SEQUENCE NUMBER; I=INSERTION CODE.)",
             "REMARK 465",
@@ -337,32 +378,41 @@ class StandardizedPDBFixer(PDBFixer):
         for chain, res_id, res_name, atoms in self.missing_atoms_added:
             missing_atoms_info_as_dict[(chain, res_id, res_name)] += atoms
         system = forcefield.createSystem(self.topology, nonbondedMethod=app.CutoffNonPeriodic, constraints=None, rigidWater=False)
+        nonstd_names = [res.name for res, stdname in self.nonstandardResidues]
         for residue in self.topology.residues():
             resdata = (residue.chain.id, int(residue.id), residue.name)
             if resdata in self.missing_residues_added:
                 self.log(f'Found fixed residue: {residue}')
                 continue
             
-            for atom in residue.atoms():
+            for i, atom in enumerate(residue.atoms()):
+                # Always constrained all atoms in modified residue, including hydrogens (because we don't have good force field)
+                if residue.name in nonstd_names:
+                    system.setParticleMass(atom.index, 0.0)
+                    continue
                 if (resdata in missing_atoms_info_as_dict) and (atom.name in missing_atoms_info_as_dict[resdata]):
                     self.log(f'Found fixed atom: {atom}')
                     continue
                 if atom.element is app.element.hydrogen:
+                    continue
+                if (self._has_ligand) and (residue.index == self.topology.getNumResidues() - 1) and (i in self.ligand_missing_atoms):
                     continue
                 system.setParticleMass(atom.index, 0.0)
 
         integrator = mm.LangevinIntegrator(300*unit.kelvin, 10/unit.picosecond, 5*unit.femtosecond)
         context = mm.Context(system, integrator)
         context.setPositions(self.positions)
-        mm.LocalEnergyMinimizer.minimize(context)
+        mm.LocalEnergyMinimizer.minimize(context, tolerance=10)
         self.positions = context.getState(getPositions=True).getPositions()
         return self.positions
     
     def runFixWorkflow(
         self, 
-        output_file: os.PathLike, 
+        output_protein: os.PathLike,
+        output_ligand: Optional[os.PathLike] = None,
         skip_add_terminal_residues: bool = True, 
         skip_add_terminal_oxygens: bool = False, 
+        skip_long_missing_residues: Optional[int] = 10,
         add_hydrogens: bool = True, 
         refine_positions: bool = True, 
         res_num_mapping: Optional[Dict] = None
@@ -371,40 +421,82 @@ class StandardizedPDBFixer(PDBFixer):
         Parameters
         """
         self.findNonstandardResidues()
-        self.findMissingResidues(skip_terminals=skip_add_terminal_residues)
+        self.findMissingResidues(skip_terminals=skip_add_terminal_residues, skip_long_residues=skip_long_missing_residues)
         self.findMissingAtoms(skip_terminals=skip_add_terminal_oxygens)
         self.addMissingAtoms()
         if add_hydrogens or refine_positions:
             self.addMissingHydrogens(7.4)
 
         top_xmls, ff_xmls = [], []
-        dirname = os.path.dirname(output_file)
-        for residue, std_name in self.nonstandardResidues:
-            top_xml, ff_xml = createPatch(residue, dirname)
-            top_xmls.append(top_xml)
-            ff_xmls.append(ff_xml)
+        dirname = os.path.dirname(output_protein)
+
+        # Don't use self.nonstandardResidues directly, because PDBFixer will add atoms to it
+        nonstd_names = [res.name for res, stdname in self.nonstandardResidues]
+        for residue in self.topology.residues():
+            if residue.name in nonstd_names:
+                self.log('Modified residue:', residue)
+                self.log('Bonds:', list(residue.bonds()))
+                self.log('Atoms:', list(residue.atoms()))
+                top_xml, ff_xml = createPatch(residue, dirname)
+                top_xmls.append(top_xml)
+                ff_xmls.append(ff_xml)
         
+        # Re-add ligand topology because PDBFixer will remove all the ligand bonds...
+        if self._has_ligand:
+            protein = Structure(self.topology, self.positions).select_residues([residue for residue in self.topology.residues()][:-1])
+            protein_top = protein.topology
+            protein_pos = protein.positions
+            modeller = app.Modeller(protein_top, protein_pos)
+            modeller.add(self.ligand_top, self.ligand_pos)
+            self.topology = modeller.getTopology()
+            self.positions = modeller.getPositions()
+
         if refine_positions:
             for top_xml in top_xmls:
                 app.Topology.loadBondDefinitions(top_xml)
             self.topology.createStandardBonds()
-            ff = app.ForceField('amber14-all.xml', 'tip3p.xml', *list(set(ff_xmls)))
-            self.refineAddedAtomPositions(ff)
+            try:
+                ff = app.ForceField('amber14-all.xml', 'tip3p.xml', *list(set(ff_xmls)))
+                if self._has_ligand:
+                    generator = SMIRNOFFTemplateGenerator(molecules=[self.off_mol]).generator
+                    ff.registerTemplateGenerator(generator)
+                self.refineAddedAtomPositions(ff)
+            except ValueError:
+                for residue in self.topology.residues():
+                    if residue.name == 'PCA':
+                        print(list(residue.atoms()), list(residue.bonds()))
+                # Some cases OpenFF will failed, use GAFF
+                ff = app.ForceField('amber14-all.xml', 'tip3p.xml', *list(set(ff_xmls)))
+                if self._has_ligand:
+                    generator = GAFFTemplateGenerator(molecules=[self.off_mol], forcefield='gaff-2.11').generator
+                    ff.registerTemplateGenerator(generator)
+                self.refineAddedAtomPositions(ff)
+
         
-        headers = []
-        for seq in self.sequences:
-            headers.append(convert_to_seqres(seq.residues, seq.chainId))
+        if self._has_ligand:
+            protein = Structure(self.topology, self.positions).select_residues([residue for residue in self.topology.residues()][:-1])
+            protein_top = protein.topology
+            protein_pos = protein.positions
+        else:
+            protein_top = self.topology
+            protein_pos = self.positions
+        
+        # Save protein
+        seqres = [(seq.chainId, convert_to_seqres(seq.residues, seq.chainId)) for seq in self.sequences]
+        seqres.sort(key=lambda x: x[0])
+        headers = [x[1] for x in seqres]
+        headers += StandardizedPDBFixer.getFixedResidueRemarks(self.missing_residues_skipped, res_num_mapping, use_fixed_remark=False)
         headers += StandardizedPDBFixer.getFixedResidueRemarks(self.missing_residues_added, res_num_mapping)
         headers += StandardizedPDBFixer.getFixedAtomRemarks(self.missing_atoms_added, res_num_mapping)
         headers += StandardizedPDBFixer.getModresRecords(self.mod_res_info, res_num_mapping, self.pdb_id)
 
-        fp = open(output_file, 'w')
-        app.PDBFile.writeHeader(self.topology, fp)
+        fp = open(output_protein, 'w')
+        app.PDBFile.writeHeader(protein_top, fp)
         for line in headers:
             print(line, file=fp)
         # map back residue id and icode
         if res_num_mapping:
-            for residue in self.topology.residues():
+            for residue in protein_top.residues():
                 res_id = res_num_mapping[residue.chain.id][int(residue.id)]
                 if res_id[-1].isalpha():
                     insert_code = res_id[-1]
@@ -414,5 +506,13 @@ class StandardizedPDBFixer(PDBFixer):
                 residue.id = res_id
                 residue.insertionCode = insert_code
 
-        app.PDBFile.writeModel(self.topology, self.positions, keepIds=True, file=fp)
-        app.PDBFile.writeFooter(self.topology, file=fp)
+        app.PDBFile.writeModel(protein_top, protein_pos, keepIds=True, file=fp)
+        app.PDBFile.writeFooter(protein_top, file=fp)
+
+        # Save ligand
+        if self._has_ligand:
+            for i in range(self.rdmol.GetNumAtoms()):
+                vec = self.positions[i + protein_top.getNumAtoms()]
+                self.rdmol.GetConformer().SetAtomPosition(i, [vec.x * 10, vec.y * 10, vec.z * 10])
+            with Chem.SDWriter(output_ligand) as w:
+                w.write(self.rdmol)

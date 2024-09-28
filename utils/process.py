@@ -19,13 +19,15 @@ import openmm.app as app
 
 from fix_protein import *
 from fix_ligand import *
+from fix_polymer import *
 from rcsb import *
+# from refine import *
 
 
 standardResidues = [
     'ALA', 'ASN', 'CYS', 'GLU', 'HIS', 'LEU', 'MET', 'PRO', 'THR', 'TYR',
     'ARG', 'ASP', 'GLN', 'GLY', 'ILE', 'LYS', 'PHE', 'SER', 'TRP', 'VAL',
-    'CYM', 'CYX', 'GLH', 'ASH', 'LYN', 'HID', 'HIE', 'HIP', 'HIN' 
+    # 'CYM', 'CYX', 'GLH', 'ASH', 'LYN', 'HID', 'HIE', 'HIP', 'HIN' 
     'A', 'G', 'C', 'U', 'I', 'DA', 'DG', 'DC', 'DT', 'DI'
 ]
 
@@ -162,8 +164,9 @@ def get_cif_header(cif_path, chains = None, lig_of_interest = None):
                 
     # Extracting _pdbx_poly_seq_scheme category for sequence resid mapping
     residue_num_mapping = defaultdict(dict)
-    for row in block.find('_pdbx_poly_seq_scheme.', ['seq_id', 'mon_id', 'pdb_seq_num', 'pdb_ins_code', 'pdb_strand_id']):
-        chain_id = row[-1]
+    poly_residues = []
+    for row in block.find('_pdbx_poly_seq_scheme.', ['seq_id', 'mon_id', 'pdb_seq_num', 'pdb_ins_code', 'pdb_strand_id', 'auth_mon_id']):
+        chain_id = row[4]
         if chains is None or chain_id in chains:
             res_name = mmcif_corrector(row[1], str)
             seq_id = mmcif_corrector(row[0], int)
@@ -171,6 +174,8 @@ def get_cif_header(cif_path, chains = None, lig_of_interest = None):
             ins_code = mmcif_corrector(row[3], str) if row[3]!='.' else ''
             resnum_total = f"{res_num}{ins_code}"
             residue_num_mapping[chain_id][seq_id] = resnum_total
+            if mmcif_corrector(row[-1], str) is not None:
+                poly_residues.append((chain_id, resnum_total, res_name))
     
     # Extracting _pdbx_nonpoly_scheme for asymid and strand id mapping
     nonpoly_maaping = {}
@@ -195,7 +200,7 @@ def get_cif_header(cif_path, chains = None, lig_of_interest = None):
     differences_df = pd.DataFrame(sequence_differences, columns=diff_columns)
     alignment_df = pd.DataFrame(alignment_data, columns=columns)
 
-    return alignment_df, differences_df, residue_num_mapping, nonpoly_maaping, prd_data
+    return alignment_df, differences_df, residue_num_mapping, nonpoly_maaping, prd_data, poly_residues
 
 
 def extract_pdb_information(pdb_file):
@@ -277,13 +282,24 @@ def extract_chain_specific_information(lines, chain_list):
 def create_residue_connection_graph(topology: app.Topology):
     graph = nx.Graph()
     graph.add_nodes_from([res for res in topology.residues()])
+
+    non_metals = {
+        'H', 'He', 
+        'B', 'C', 'N', 'O', 'F', 'Ne', 
+        'Si', 'P', 'S', 'Cl', 'Ar',
+        'As', 'Se', 'Br', 'Kr',
+        'Te', 'I', 'Xe', 'Rn'
+    }
+    metal_residues = set()
+    for residue in topology.residues():
+        if len(residue) == 1 and list(residue.atoms())[0].element.symbol not in non_metals:
+            metal_residues.add(residue)
     for bond in topology.bonds():
         res1, res2 = bond.atom1.residue, bond.atom2.residue
         # don't include metal bonds
-        if len(res1) == 1 or len(res2) == 1:
+        if (res1 in metal_residues) or (res2 in metal_residues):
             continue
-        if not (res1 is res2):
-            graph.add_edge(res1, res2)
+        graph.add_edge(res1, res2)
     return graph
 
 
@@ -296,9 +312,46 @@ def find_connected_residues(graph, residue):
     return find
 
 
-def find_ligand_residues(topology: app.Topology, ligand_chain: str, ligand_residue_numbers: List, max_num_residues: int = 20, find_connected: bool = True):
+def find_ligand_residues(topology: app.Topology, ligand_chain: str, ligand_residue_numbers: List, max_num_residues: int = 20, find_connected: bool = True, enforce_connected: bool = False):
+    """
+    Identify and return a list of ligand residues from a specified chain in a molecular topology.
+
+    This function searches for specified residues in the given `ligand_chain` of a molecular topology 
+    (represented by an OpenMM `Topology` object). It can optionally find residues that are connected 
+    to the specified ligand residues, and enforce that all provided residues are connected in the topology.
+
+    
+    Parameters
+    ----------
+    topology : app.Topology
+        The OpenMM Topology object representing the molecular system.
+    ligand_chain : str
+        The identifier of the chain that contains the ligand residues.
+    ligand_residue_numbers : List[int] or List[str]
+        A list of residue numbers for the ligand that should be identified.
+    max_num_residues : int, optional
+        The maximum number of ligand residues that can be returned (default is 20).
+    find_connected : bool, optional
+        If True, attempt to find and include residues connected to the specified ligand residues (default is True).
+    enforce_connected : bool, optional
+        If True, ensure that all specified residues are connected in the topology; raises an assertion error otherwise (default is False).
+        Only be used when `find_connected` is True.
+
+    Returns
+    -------
+    residues: List[app.Residue]
+        A list of residues that match the specified ligand residue numbers or are connected to them.
+
+    Raises
+    ------
+    AssertionError:
+        If the specified residues do not exist in the topology or if the number of identified residues exceeds `max_num_residues`.
+        If `enforce_connected` is True and the residues are not all connected.
+
+    """
     ligand_residues_number_str = [str(x) for x in ligand_residue_numbers]
     graph = create_residue_connection_graph(topology)
+    
     residues = set()
     for chain in topology.chains():
         if chain.id != ligand_chain:
@@ -311,11 +364,15 @@ def find_ligand_residues(topology: app.Topology, ligand_chain: str, ligand_resid
                     if len(residues) == 0:
                         residues = candidate
                     else:
-                        assert candidate == residues, "Provided residues are in different chains"
+                        if enforce_connected:
+                            assert candidate == residues, "Provided residues are not connected"
+                        else:
+                            residues = residues.union(candidate)
                 else:
                     residues.add(residue)
-    assert residues is not None, "Provided residues don't exist"
-    assert len(residues) <= max_num_residues, f"Number of ligand residues ({len(residues)}) exceed limit ({max_num_residues})"
+    assert len(residues) > 0, "Provided residues don't exist"
+    if max_num_residues is not None:
+        assert len(residues) <= max_num_residues, f"Number of ligand residues ({len(residues)}) exceed limit ({max_num_residues})"
     return list(residues)
 
 
@@ -326,7 +383,8 @@ def process_everything(
     dataset_dir: Optional[os.PathLike] = '../raw_data',
     binding_cutoff: float = 10.0, 
     hetatm_cutoff: float = 4.0,
-    find_connected_ligand_residues: bool = True
+    find_connected_ligand_residues: bool = True,
+    max_num_residues: int = 20,
 ):
     """
     Run process workflow
@@ -346,10 +404,12 @@ def process_everything(
 
     # read in the key properties from the original pdb and cif file
     key_properties, interchain_ss, modres_info, connect = extract_pdb_information(pdb_file)
-    alignment_info, diff_info, res_num_mapping, nonpoly_mapping, prd_data = get_cif_header(cif_file)
+    alignment_info, diff_info, res_num_mapping, nonpoly_mapping, prd_data, poly_residues_cif = get_cif_header(cif_file)
     sequences = {}
     for _, row in alignment_info.iterrows():
         sequences[row['chain_id']] = convert_to_three_letter_seq(row['pdbx_seq_one_letter_code'])
+    with open(os.path.join(folder, 'res_num_mapping.json'), 'w') as f:
+        json.dump(res_num_mapping, f, indent=4)
     
     # OpenMM will change residue namings
     app.PDBFile._loadNameReplacementTables()
@@ -359,16 +419,36 @@ def process_everything(
     
     # Find ligand residues
     if ligand_info is None:
-        assert isinstance(ligand_id, str), "Must provide ligand id"
         ligand_info = []
-        for residue in struct.topology.residues():
-            if residue.name == ligand_id:
-                ligand_info.append([residue.chain.id, [residue.id]])
+        if ligand_id:
+            for residue in struct.topology.residues():
+                if residue.name == ligand_id:
+                    ligand_info.append([residue.chain.id, [f'{residue.id}{residue.insertionCode}'.strip()]])
+        else:
+            # Use for polymer ligand, such as peptides, polysaccharides
+            # Try to use sequence information
+            for chainId, seq in sequences.items():
+                if len(seq) > max_num_residues or len(seq) < 2:
+                    continue
+                resnums = []
+                for residue in struct.topology.residues():
+                    if (residue.chain.id == chainId) and (residue.name in seq):
+                        resnums.append(f'{residue.id}{residue.insertionCode}'.strip())
+                ligand_info.append([chainId, resnums])
+            
+            if len(ligand_info) == 0:
+                graph = create_residue_connection_graph(struct.topology)
+                for subgraph in nx.connected_components(graph):
+                    if len(subgraph) > 20 or len(subgraph) < 2:
+                        continue
+                    residues = list(subgraph)
+                    resnums = [f'{r.id}{r.insertionCode}'.strip() for r in residues]
+                    ligand_info.append([residues[0].chain.id, resnums])
     assert len(ligand_info) > 0, "No ligands found"
 
     ligand_residues_list = []
     for chain, residue_numbers in ligand_info:
-        ligand_residues = find_ligand_residues(struct.topology, chain, residue_numbers, find_connected_ligand_residues)
+        ligand_residues = find_ligand_residues(struct.topology, chain, residue_numbers, max_num_residues=20, find_connected=find_connected_ligand_residues)
         ligand_residues_list.append(ligand_residues)
     
     
@@ -383,7 +463,7 @@ def process_everything(
     for residue in struct.topology.residues():
         if any([residue in ligand_residues for ligand_residues in ligand_residues_list]):
             continue
-        if (residue.chain.id, f'{residue.id}{residue.insertionCode}'.strip()) in polymer_residues_info:
+        if (residue.chain.id, f'{residue.id}{residue.insertionCode}'.strip(), residue.name) in poly_residues_cif:
             polymer_residues[residue.chain.id].append(residue)
         else:
             hetero_residues.append(residue)
@@ -407,9 +487,11 @@ def process_everything(
         if len(ligand_residues) == 1:
             ligand_name = ligand_residues[0].name
             ligand_number = f"{ligand_residues[0].id}{ligand_residues[0].insertionCode}".strip()
-        else:     
+        else:
+            # Handle polymers     
             ligand_name = f'{ligand_residues[0].name}-{ligand_residues[-1].name}'
             ligand_number =  f"{ligand_residues[0].id}{ligand_residues[0].insertionCode}".strip() + '-' + f"{ligand_residues[-1].id}{ligand_residues[-1].insertionCode}".strip()
+
         basename = f"{pdb_id}_{ligand_name}_{ligand_chain}_{ligand_number}"
         subfolder = os.path.join(folder, basename)
         if not os.path.isdir(subfolder): os.mkdir(subfolder)
@@ -479,10 +561,21 @@ def process_everything(
         else:
             query_id = None
         
-        ref_smi = get_reference_smi(pdb_id, query_id)
+        ref_smi, ref_name = get_reference_smi(pdb_id, query_id)
+        if not ref_smi:
+            # Generate reference smiles from squence
+            try:
+                seq = sequences[ligand_residues[0].chain.id]
+                if 2 < len(seq) <= max_num_residues:
+                    ref_mol = mol_from_seq(seq)
+                    ref_smi = Chem.MolToSmiles(ref_mol)
+                    ref_name = 'seq:' + ','.join(seq)
+            except:
+                ref_smi = None
+
         if ref_smi:
             with open(os.path.join(subfolder, f'ref.smi'), 'w') as f:
-                f.write(ref_smi)
+                f.write(ref_smi + ' ' + ref_name)
         
         # convert PDB to SDF
         ligand_sdf = os.path.join(subfolder, f'{basename}_ligand.sdf')
@@ -520,13 +613,8 @@ def process_everything(
         
         # all 
         chain_properties, ssbond_lines = extract_chain_specific_information(key_properties, chains_include)
-        all_pdb = os.path.join(subfolder, f'{basename}_rcsb.pdb')
-        struct.select_residues(include['ligand'] + include['polymer'] + include['hetatm']).save(all_pdb, header='\n'.join(chain_properties))
-
-        # fix proteins
-        protein_pdb_fixed = os.path.join(subfolder, f'{basename}_protein_fixed.pdb')
-        fixer = StandardizedPDBFixer(filename=protein_pdb, pdb_id=pdb_id)
-        fixer.runFixWorkflow(output_file=protein_pdb_fixed, res_num_mapping=res_num_mapping)
+        all_pdb = os.path.join(subfolder, f'{basename}_protein_hetatm.pdb')
+        struct.select_residues(include['polymer'] + include['hetatm']).save(all_pdb, header='\n'.join(chain_properties))
     
     # Record alignment info
     alignment_info = alignment_info[alignment_info['chain_id'].isin(all_chains_to_include)]
@@ -535,6 +623,28 @@ def process_everything(
     diff_info.to_csv(os.path.join(folder, 'diff_info.csv'), index=None)
 
     fix_ligands_in_folder(folder)
+    refine_structure_with_ligand(folder)
+
+    fp = open(os.path.join(folder, 'done.tag'), 'w')
+    fp.close()
+
+
+def refine_structure_with_ligand(folder):
+    pdb_id = os.path.basename(folder)
+    res_num_mapping = {}
+    with open(os.path.join(folder, 'res_num_mapping.json')) as f:
+        for chain, mapping in json.load(f).items():
+            res_num_mapping[chain] = {int(k): v for k, v in mapping.items()}
+    
+    for protein_pdb in glob.glob(os.path.join(folder, '*/*_protein.pdb')):
+        ligand_sdf = protein_pdb.replace("_protein.pdb", "_ligand_fixed.sdf")
+        fixer = StandardizedPDBFixer(protein_pdb=protein_pdb, ligand_sdf=ligand_sdf, pdb_id=pdb_id, verbose=False)
+        fixer.runFixWorkflow(
+            output_protein=protein_pdb.replace("_protein.pdb", "_protein_refined.pdb"),
+            output_ligand=ligand_sdf.replace("_fixed.sdf", "_refined.sdf"),
+            res_num_mapping=res_num_mapping,
+            refine_positions=True
+        )
 
 
 def fix_ligands_in_folder(folder):
@@ -546,7 +656,7 @@ def fix_ligands_in_folder(folder):
             ref_smi = None
         else:
             with open(smi_file) as f:
-                ref_smi = f.read()
+                ref_smi = f.read().split()[0]
         name = os.path.basename(ligand_pdb)[:-11]
         out_sdf = ligand_pdb.replace("_ligand.pdb", "_ligand_fixed.sdf")
         
@@ -578,7 +688,7 @@ if __name__ == "__main__":
     import pandas as pd
     import json
 
-    dataset_dir = '../raw_data_pdbbind_sm'
+    dataset_dir = '../raw_data_biolip_sm'
     # dataset_dir = '../edge_cases'
     if not os.path.isdir(dataset_dir):
         os.mkdir(dataset_dir)
@@ -593,7 +703,12 @@ if __name__ == "__main__":
             with open(os.path.join(dataset_dir, f'{pdbid}/err'), 'w') as f:
                 f.write(errmsg)
     
-    df = pd.read_csv('../biolip/PDBBind_sm.csv')
+    # PDBBind Small Molecule
+    # df = pd.read_csv('../biolip/PDBBind_sm.csv')
+
+    # BioLip small molecule
+    df = pd.read_csv('../biolip/BioLiP_bind_sm.csv')
+    
     args = []
     for pdbid, subdf in df.groupby('PDBID'):
         ligand_info, ligand_ccd = [], None
@@ -608,17 +723,10 @@ if __name__ == "__main__":
             ligand_ccd = subdf['Ligand CCD'].iloc[0]
         arg = (pdbid, ligand_ccd, ligand_info)
         args.append(arg)
-    # print(len(args))
-    # exit(0)
-    # args = args[:1000]
-    # args = [(pdb_id, ligand_id) for pdb_id, ligand_id in zip(df['PDBID'], df['Ligand CCD']) if pdb_id in ['1a8i']]
-    # args = [arg for arg in args if arg[0] in ['1ado']]
-    # print(args)
-    # args = args[-200:-100]
-    # args = [('4xs2', '42P', None)]
-    with open('Rerun.list') as f:
-        errlist = f.read().split('\n')
-    args = [arg for arg in args if arg[0] in errlist]
+    
+    # PDBBind Polymers
+    # args = [(pdbid, None, None) for pdbid in pd.read_csv('../biolip/PDBBind_poly.csv')['PDBID'].unique()]
+
     for arg in args:
         if os.path.isdir(os.path.join(dataset_dir, arg[0])):
             shutil.rmtree(os.path.join(dataset_dir, arg[0]))
