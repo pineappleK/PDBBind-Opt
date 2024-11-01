@@ -3,8 +3,8 @@ from collections import defaultdict
 
 
 if __name__ == '__main__':
-    dataset_dir = '../raw_data_pdbbind_poly'
-    report_file = 'PDBBind-poly.md'
+    dataset_dir = '../raw_data_biolip_sm'
+    report_file = 'BioLiP-opt.md'
     
     err_types = defaultdict(list)
     for err in glob.glob(os.path.join(dataset_dir, '*/err')):

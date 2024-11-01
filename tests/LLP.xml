@@ -1,0 +1,110 @@
+
+<ForceField>
+  <AtomTypes>
+    <Type element="N" name="LLP-N1" class="LLP-N1" mass="14.00672"/>
+    <Type element="C" name="LLP-C2" class="LLP-C2" mass="12.01078"/>
+    <Type element="C" name="LLP-C2'" class="LLP-C2'" mass="12.01078"/>
+    <Type element="C" name="LLP-C3" class="LLP-C3" mass="12.01078"/>
+    <Type element="O" name="LLP-O3" class="LLP-O3" mass="15.99943"/>
+    <Type element="C" name="LLP-C4" class="LLP-C4" mass="12.01078"/>
+    <Type element="C" name="LLP-C4'" class="LLP-C4'" mass="12.01078"/>
+    <Type element="C" name="LLP-C5" class="LLP-C5" mass="12.01078"/>
+    <Type element="C" name="LLP-C6" class="LLP-C6" mass="12.01078"/>
+    <Type element="C" name="LLP-C5'" class="LLP-C5'" mass="12.01078"/>
+    <Type element="O" name="LLP-OP4" class="LLP-OP4" mass="15.99943"/>
+    <Type element="P" name="LLP-P" class="LLP-P" mass="30.9737622"/>
+    <Type element="O" name="LLP-OP1" class="LLP-OP1" mass="15.99943"/>
+    <Type element="O" name="LLP-OP2" class="LLP-OP2" mass="15.99943"/>
+    <Type element="O" name="LLP-OP3" class="LLP-OP3" mass="15.99943"/>
+    <Type element="N" name="LLP-N" class="LLP-N" mass="14.00672"/>
+    <Type element="C" name="LLP-CA" class="LLP-CA" mass="12.01078"/>
+    <Type element="C" name="LLP-CB" class="LLP-CB" mass="12.01078"/>
+    <Type element="C" name="LLP-CG" class="LLP-CG" mass="12.01078"/>
+    <Type element="C" name="LLP-CD" class="LLP-CD" mass="12.01078"/>
+    <Type element="C" name="LLP-CE" class="LLP-CE" mass="12.01078"/>
+    <Type element="N" name="LLP-NZ" class="LLP-NZ" mass="14.00672"/>
+    <Type element="C" name="LLP-C" class="LLP-C" mass="12.01078"/>
+    <Type element="O" name="LLP-O" class="LLP-O" mass="15.99943"/>
+  </AtomTypes>
+  <Residues>
+    <Residue name="LLP">
+      <Atom name="N1" type="LLP-N1" charge="0.0"/>
+      <Atom name="C2" type="LLP-C2" charge="0.0"/>
+      <Atom name="C2'" type="LLP-C2'" charge="0.0"/>
+      <Atom name="C3" type="LLP-C3" charge="0.0"/>
+      <Atom name="O3" type="LLP-O3" charge="0.0"/>
+      <Atom name="C4" type="LLP-C4" charge="0.0"/>
+      <Atom name="C4'" type="LLP-C4'" charge="0.0"/>
+      <Atom name="C5" type="LLP-C5" charge="0.0"/>
+      <Atom name="C6" type="LLP-C6" charge="0.0"/>
+      <Atom name="C5'" type="LLP-C5'" charge="0.0"/>
+      <Atom name="OP4" type="LLP-OP4" charge="0.0"/>
+      <Atom name="P" type="LLP-P" charge="0.0"/>
+      <Atom name="OP1" type="LLP-OP1" charge="0.0"/>
+      <Atom name="OP2" type="LLP-OP2" charge="0.0"/>
+      <Atom name="OP3" type="LLP-OP3" charge="0.0"/>
+      <Atom name="N" type="LLP-N" charge="0.0"/>
+      <Atom name="CA" type="LLP-CA" charge="0.0"/>
+      <Atom name="CB" type="LLP-CB" charge="0.0"/>
+      <Atom name="CG" type="LLP-CG" charge="0.0"/>
+      <Atom name="CD" type="LLP-CD" charge="0.0"/>
+      <Atom name="CE" type="LLP-CE" charge="0.0"/>
+      <Atom name="NZ" type="LLP-NZ" charge="0.0"/>
+      <Atom name="C" type="LLP-C" charge="0.0"/>
+      <Atom name="O" type="LLP-O" charge="0.0"/>
+      <Bond atomName1="N1" atomName2="C2"/>
+      <Bond atomName1="N1" atomName2="C6"/>
+      <Bond atomName1="C2" atomName2="C2'"/>
+      <Bond atomName1="C2" atomName2="C3"/>
+      <Bond atomName1="C3" atomName2="O3"/>
+      <Bond atomName1="C3" atomName2="C4"/>
+      <Bond atomName1="C4" atomName2="C4'"/>
+      <Bond atomName1="C4" atomName2="C5"/>
+      <Bond atomName1="C4'" atomName2="NZ"/>
+      <Bond atomName1="C5" atomName2="C6"/>
+      <Bond atomName1="C5" atomName2="C5'"/>
+      <Bond atomName1="C5'" atomName2="OP4"/>
+      <Bond atomName1="OP4" atomName2="P"/>
+      <Bond atomName1="P" atomName2="OP1"/>
+      <Bond atomName1="P" atomName2="OP2"/>
+      <Bond atomName1="P" atomName2="OP3"/>
+      <Bond atomName1="N" atomName2="CA"/>
+      <Bond atomName1="CA" atomName2="CB"/>
+      <Bond atomName1="CA" atomName2="C"/>
+      <Bond atomName1="CB" atomName2="CG"/>
+      <Bond atomName1="CG" atomName2="CD"/>
+      <Bond atomName1="CD" atomName2="CE"/>
+      <Bond atomName1="CE" atomName2="NZ"/>
+      <Bond atomName1="C" atomName2="O"/>
+      <ExternalBond atomName="N"/>
+      <ExternalBond atomName="C"/>
+    </Residue>
+  </Residues>
+  <NonbondedForce coulomb14scale="0.8333333333333334" lj14scale="0.5">
+    <UseAttributeFromResidue name="charge"/>
+    <Atom type="LLP-N1" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-C2" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-C2'" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-C3" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-O3" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-C4" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-C4'" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-C5" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-C6" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-C5'" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-OP4" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-P" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-OP1" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-OP2" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-OP3" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-N" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-CA" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-CB" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-CG" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-CD" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-CE" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-NZ" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-C" sigma="0.2" epsilon="0.2"/>
+    <Atom type="LLP-O" sigma="0.2" epsilon="0.2"/>
+  </NonbondedForce>
+</ForceField>

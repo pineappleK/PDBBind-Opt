@@ -1,34 +1,38 @@
-# LP-PDBBind-Preprocess
-Catching errors in ligand for LP-PDBBind
+# PDBBind-Opt Workflow
 
-- Potential Errors in a Protein File
-  - residue number not starting from 1 for a new chain [old pdbs]
-  - seqres did not record missing residues - pdbfixer could not directly fix; need manual input [for instance, pdb: 6hqy]
-  - pdbbind appears that the ligands interact with multiple chains whereas the ligand interacts with only one chain [6PHR]
-  - pdbbind shows that the ligands interact with one chain but include multiple chains in their record [5CBM].
-  - residue number not consistent across different pdbs - some starts from MET1; some with MET0
-  - 
+This repository contains scripts of PDBBind-Opt workflow, which organizes a bunch of open-source softwares to probe and fix structural problems in PDBBind.
 
-## Update 09/24
-Finalize protein fixer and ligand fixer code.
+![workflow](assets/workflow.svg)
 
-## Update 09/10
+## Code availability
 
-A refactor of protein fixing code class to fix:
-1. Wrong residue numbers in REMARK 465 record (example: 2ZMD)
-2. Steric-clashed structures given by PDBFixer.
-    PDBFixer use an incorrect [forcefield](https://github.com/openmm/pdbfixer/blob/master/pdbfixer/pdbfixer.py#L1424) to minimize structures with added residues. I guess it is designed to be as generic
-    as possible to handle non-standard residues and structures without hydrogens. But it will result in very unphysical strcutres.
-    Therefore, I use amber14/tip3p forcefield to further energy minimize the structure after the PDBFixer, and this will give resonable structures. But proteins with non-standard residues can still not be handled.
++ `pre_process/`: Scripts to prepare PDBBind and BioLiP dataset (identifying ligands and extract binding affinity data)
++ `workflow/`: Codes for PDBBind-Opt worflow
+  - `dimorphite_dl`: Package to assign protonation states. We modified the `site_substructures.smarts` to make the rules easier.
+  - `fix_ligand.py`: LigandFixer module
+  - `fix_protein.py`: ProteinFixer module
+  - `process.py`: Main workflow
+  - `rcsb.py`: Functions to query RCSB (i.e. downloading files, query SMILES strings)
+  - `gather.py`: Functions to create metadata csv files
+  - `fix_polymer.py`: Functions to fix polymer ligands
+  - `maual_smiles.json`: Manually corrected reference SMILES
+  - `building_blocks.csv`: SMILES of alpha-amino acids and common N/C terminal caps. Used to create reference SMILES for polymers
++ `error_fix/`: Contains some error analysis
++ `figshare/`: Metadata of BioLiP2-Opt and PDBBind-Opt dumped in Figshare repo.
 
+## How to reconstruct PDBBind-Opt and BioLiP-Opt
 
-## Update 09/05
-
-Steps to run workflow:
-1. Run `biolip/create_dataset.ipynb` to download BioLiP entries and extract non-covalent small molecule binders with binding affinity annotation
-2. Run `utils/process.py` to start the ligand/protein fix workflow
-
-Problems
-1. BioLiP may only annotate ONE residue with binding affinity even though the residue is part of a polymer, i.e. polypeptide(-like), polynucleotide, polysaccharide
-2. The current workflow should be adapted: given a ligand id (CCD code) -> use the CONECT record to extract the polymer
-3. Ligand fixer workflow should be adapted to handle polymers, mainly about get reference SMILES for polymer
++ **Step 1**: Download PDBBind index file from their official website. Run `download.sh` in the `pre_process` to download BioLiP2 dataset
++ **Step 2**: Run `pre_process/create_dataset_csv.ipynb` to extract binding affinity and identifying ligands. This will give the three csv files
++ **Step 3**: Go to the `workflow` and use the following command to run the workflow
+```bash
+mkdir ../raw_data
+python procees.py -i ../pre_process/BioLiP_bind_sm.csv -d ../raw_data/biolip2_opt
+python procees.py -i ../pre_process/PDBBind_poly.csv -d ../raw_data/pdbbind_opt_poly --poly
+python procees.py -i ../pre_process/PDBBind_sm.csv -d ../raw_data/pdbbind_opt_sm
+```
+This will take about one day on a 256-core CPU. If you have more nodes, considering split the input csv file to several chunks and run them in parallel. When the workflow finish, in the output directory, each PDBID will have a folder and if the workflow succeed on this PDBID, there will be a file named `done.tag` under its folder, otherwise ther will be a file named `err`. 
++ **Step 4**: Run the `gather.py` to create metadata files, for example:
+```bash
+python gather.py -i ../pre_process/BioLiP_bind_sm.csv -d ../raw_data/biolip2_opt -o ../figshare/biolip2_opt/biolip2_opt.csv
+```

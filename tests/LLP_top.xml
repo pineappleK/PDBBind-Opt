@@ -1,0 +1,30 @@
+
+<Residues>
+  <Residue name="LLP">
+    <Bond from="-C" to="N"/>
+    <Bond from="N1" to="C2"/>
+    <Bond from="N1" to="C6"/>
+    <Bond from="C2" to="C2'"/>
+    <Bond from="C2" to="C3"/>
+    <Bond from="C3" to="O3"/>
+    <Bond from="C3" to="C4"/>
+    <Bond from="C4" to="C4'"/>
+    <Bond from="C4" to="C5"/>
+    <Bond from="C4'" to="NZ"/>
+    <Bond from="C5" to="C6"/>
+    <Bond from="C5" to="C5'"/>
+    <Bond from="C5'" to="OP4"/>
+    <Bond from="OP4" to="P"/>
+    <Bond from="P" to="OP1"/>
+    <Bond from="P" to="OP2"/>
+    <Bond from="P" to="OP3"/>
+    <Bond from="N" to="CA"/>
+    <Bond from="CA" to="CB"/>
+    <Bond from="CA" to="C"/>
+    <Bond from="CB" to="CG"/>
+    <Bond from="CG" to="CD"/>
+    <Bond from="CD" to="CE"/>
+    <Bond from="CE" to="NZ"/>
+    <Bond from="C" to="O"/>
+  </Residue>
+</Residues>
