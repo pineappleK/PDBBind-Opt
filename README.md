@@ -1,5 +1,7 @@
 # PDBBind-Opt Workflow
 
+[![arxiv](https://img.shields.io/badge/arXiv-2411.01223-blue)](https://arxiv.org/abs/2411.01223)
+
 This repository contains scripts of PDBBind-Opt workflow, which organizes a bunch of open-source softwares to probe and fix structural problems in PDBBind.
 
 ![workflow](assets/workflow.svg)
@@ -19,6 +21,10 @@ This repository contains scripts of PDBBind-Opt workflow, which organizes a bunc
   - `building_blocks.csv`: SMILES of alpha-amino acids and common N/C terminal caps. Used to create reference SMILES for polymers
 + `error_fix/`: Contains some error analysis
 + `figshare/`: Metadata of BioLiP2-Opt and PDBBind-Opt dumped in Figshare repo.
+
+## Dataset availability
+
+PDBBind-Opt and BioLiP2-Opt datasets prepared by PDBBind-Opt workflow can be found in this [Figshare repoistory](https://figshare.com/collections/PDBBind_Optimization_to_Create_a_High-Quality_Protein-Ligand_Binding_Dataset_for_Binding_Affinity_Prediction/7520133/1).
 
 ## How to reconstruct PDBBind-Opt and BioLiP-Opt
 
