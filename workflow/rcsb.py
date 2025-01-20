@@ -8,7 +8,7 @@ import os
 import re
 import requests
 import urllib
-import wget
+# import wget
 import subprocess
 from rdkit import Chem
 
